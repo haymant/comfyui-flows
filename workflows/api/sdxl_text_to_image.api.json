@@ -1,0 +1,107 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0.safetensors"
+    },
+    "_meta": {
+      "title": "SDXL checkpoint"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        1
+      ],
+      "text": "A calm editorial photograph of a sunlit reading corner, a linen armchair beside a tall window, a small stack of books and a ceramic cup on a wooden side table, soft morning light, muted warm palette, fine film grain, shallow depth of field, natural textures, no text, no people."
+    },
+    "_meta": {
+      "title": "Positive prompt"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        1
+      ],
+      "text": "text, watermark, logo, signature, low quality, blurry, oversaturated, deformed, extra limbs, cartoon, cgi, plastic skin, harsh flash, cluttered composition"
+    },
+    "_meta": {
+      "title": "Negative prompt"
+    }
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Canvas"
+    }
+  },
+  "5": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "seed": 42,
+      "steps": 24,
+      "cfg": 6.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "latent_image": [
+        "4",
+        0
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "Sample"
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "5",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "6",
+        0
+      ],
+      "filename_prefix": "images/sdxl_t2i"
+    },
+    "_meta": {
+      "title": "Save image"
+    }
+  }
+}

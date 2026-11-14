@@ -1,0 +1,136 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0.safetensors"
+    },
+    "_meta": {
+      "title": "SDXL checkpoint"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        1
+      ],
+      "text": "A calm editorial photograph of a sunlit reading corner, a linen armchair beside a tall window, a small stack of books and a ceramic cup on a wooden side table, soft morning light, muted warm palette, fine film grain, shallow depth of field, natural textures, no text, no people."
+    },
+    "_meta": {
+      "title": "Positive prompt"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        1
+      ],
+      "text": "text, watermark, logo, signature, low quality, blurry, oversaturated, deformed, extra limbs, cartoon, cgi, plastic skin, harsh flash, cluttered composition"
+    },
+    "_meta": {
+      "title": "Negative prompt"
+    }
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "Source image"
+    }
+  },
+  "5": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+      "image": [
+        "4",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "megapixels": 1.0,
+      "resolution_steps": 32
+    },
+    "_meta": {
+      "title": "Fit to 1 MP"
+    }
+  },
+  "6": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "5",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "Encode"
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "seed": 42,
+      "steps": 24,
+      "cfg": 6.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "latent_image": [
+        "6",
+        0
+      ],
+      "denoise": 0.55
+    },
+    "_meta": {
+      "title": "Sample"
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ],
+      "filename_prefix": "images/sdxl_i2i"
+    },
+    "_meta": {
+      "title": "Save image"
+    }
+  }
+}
