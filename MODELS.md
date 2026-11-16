@@ -26,6 +26,22 @@ All paths are relative to `ComfyUI/models/` inside ComfyUI Desktop.
 |---|---|---:|---|
 | `checkpoints/` | `sd_xl_base_1.0.safetensors` | 6.9 GB | [stabilityai/stable-diffusion-xl-base-1.0](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) |
 
+## Optional ASR — local speech transcription
+
+The Qwen3-ASR custom node downloads model weights on first use unless a local
+model directory is supplied. This optional model is separate from the H3/SDXL
+profiles and is not fetched by `download_models.sh`.
+
+| ComfyUI models path | Model | Source | License |
+|---|---|---|---|
+| `Qwen3-ASR/Qwen3-ASR-0.6B/` | Qwen3-ASR 0.6B (workflow default) | [Qwen/Qwen3-ASR-0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) | Apache-2.0 per model card |
+| `Qwen3-ASR/Qwen3-ASR-1.7B/` | Qwen3-ASR 1.7B (optional quality alternative) | [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | Check current model card |
+| `Qwen3-ASR/Qwen3-ForcedAligner-0.6B/` | Optional forced aligner for timestamps | [Qwen/Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B) | Check current model card |
+
+Model downloads are user-triggered by running the ASR workflow. Pre-provision
+the weights for offline operation. Do not install ASR packages as part of the
+default image/video setup.
+
 ## Profile alternatives
 
 | Profile | Diffusion | Text encoder | Intended machine |

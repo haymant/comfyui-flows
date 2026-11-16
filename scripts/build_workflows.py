@@ -202,6 +202,29 @@ UI_IO: dict[str, dict] = {
         "inputs": [("video", "VIDEO", False, None)],
         "outputs": [("video", "VIDEO")],
     },
+    "LoadAudio": {
+        "inputs": [],
+        "outputs": [("AUDIO", "AUDIO")],
+    },
+    "Qwen3ASRLoader": {
+        "inputs": [],
+        "outputs": [("model", "QWEN3_ASR_MODEL")],
+    },
+    "Qwen3ASRTranscribe": {
+        "inputs": [
+            ("model", "QWEN3_ASR_MODEL", False, None),
+            ("audio", "AUDIO", False, None),
+        ],
+        "outputs": [
+            ("text", "STRING"),
+            ("language", "STRING"),
+            ("timestamps", "STRING"),
+        ],
+    },
+    "PreviewAny": {
+        "inputs": [("source", "*", False, None)],
+        "outputs": [],
+    },
 }
 
 NODE_SIZE = {
@@ -230,6 +253,10 @@ NODE_SIZE = {
     "SamplerCustomAdvanced": (250, 390),
     "CreateVideo": (270, 140),
     "SaveVideo": (540, 420),
+    "LoadAudio": (360, 136),
+    "Qwen3ASRLoader": (390, 178),
+    "Qwen3ASRTranscribe": (430, 220),
+    "PreviewAny": (280, 166),
 }
 
 
@@ -281,7 +308,7 @@ class UIGraph:
         a, b = self.by_key[src], self.by_key[dst]
         typ = a["outputs"][src_slot]["type"]
         expected = b["inputs"][dst_slot]["type"]
-        if typ != expected:
+        if typ != expected and expected != "*" and typ != "*":
             raise ValueError(f"{src}[{src_slot}] {typ} != {dst}[{dst_slot}] {expected}")
         link_id = len(self.links) + 1
         self.links.append([link_id, a["id"], src_slot, b["id"], dst_slot, typ])
@@ -708,6 +735,61 @@ def build_api_sdxl_i2i() -> None:
     dump_api("sdxl_image_to_image", g)
 
 
+def build_asr_ui() -> None:
+    g = UIGraph()
+    g.add("audio", "LoadAudio", (40, 220), ["example.wav", None, ""], "Input audio")
+    g.add(
+        "model",
+        "Qwen3ASRLoader",
+        (40, 30),
+        ["Qwen/Qwen3-ASR-0.6B", "HuggingFace", "fp16", "auto", "None", ""],
+        "Local Qwen3-ASR model",
+    )
+    g.add(
+        "transcribe",
+        "Qwen3ASRTranscribe",
+        (520, 70),
+        ["auto", "", False],
+        "Transcribe locally",
+    )
+    g.add("preview", "PreviewAny", (1040, 70), [None, None, False], "Transcript text")
+    g.link("audio", 0, "transcribe", 1)
+    g.link("model", 0, "transcribe", 0)
+    g.link("transcribe", 0, "preview", 0)
+    g.dump(UI_DIR / "qwen3_asr_local.json", "Local Qwen3-ASR transcription")
+
+
+def build_api_asr() -> None:
+    g = {
+        "1": api_node("LoadAudio", {"audio": "example.wav"}, "Input audio"),
+        "2": api_node(
+            "Qwen3ASRLoader",
+            {
+                "repo_id": "Qwen/Qwen3-ASR-0.6B",
+                "source": "HuggingFace",
+                "precision": "fp16",
+                "attention": "auto",
+                "forced_aligner": "None",
+                "local_model_path": "",
+            },
+            "Local Qwen3-ASR model",
+        ),
+        "3": api_node(
+            "Qwen3ASRTranscribe",
+            {
+                "model": ["2", 0],
+                "audio": ["1", 0],
+                "language": "auto",
+                "context": "",
+                "return_timestamps": False,
+            },
+            "Transcribe locally",
+        ),
+        "4": api_node("PreviewAny", {"source": ["3", 0]}, "Transcript text"),
+    }
+    dump_api("qwen3_asr_local", g)
+
+
 def main() -> None:
     UI_DIR.mkdir(parents=True, exist_ok=True)
     API_DIR.mkdir(parents=True, exist_ok=True)
@@ -723,6 +805,8 @@ def main() -> None:
     build_api_r2v()
     build_api_sdxl_t2i()
     build_api_sdxl_i2i()
+    build_asr_ui()
+    build_api_asr()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,56 @@
+{
+  "1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "example.wav"
+    },
+    "_meta": {
+      "title": "Input audio"
+    }
+  },
+  "2": {
+    "class_type": "Qwen3ASRLoader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-ASR-0.6B",
+      "source": "HuggingFace",
+      "precision": "fp16",
+      "attention": "auto",
+      "forced_aligner": "None",
+      "local_model_path": ""
+    },
+    "_meta": {
+      "title": "Local Qwen3-ASR model"
+    }
+  },
+  "3": {
+    "class_type": "Qwen3ASRTranscribe",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "audio": [
+        "1",
+        0
+      ],
+      "language": "auto",
+      "context": "",
+      "return_timestamps": false
+    },
+    "_meta": {
+      "title": "Transcribe locally"
+    }
+  },
+  "4": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Transcript text"
+    }
+  }
+}

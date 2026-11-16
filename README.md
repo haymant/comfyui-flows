@@ -1,8 +1,10 @@
-# comfy — standalone MiniMax H3 + SDXL workflows
+# comfy — standalone ComfyUI media workflows
 
 A self-contained ComfyUI workflow pack for **ComfyUI Desktop on Apple Silicon**.
 It generates video with native stereo audio from text or sample images, and
-still images from text or sample images.
+still images from text or sample images. An optional Qwen3-ASR workflow adds
+local audio transcription; it is a separate custom-node/model dependency and is
+not required by the image/video workflows.
 
 Nothing here imports the rest of this repository. The only contract is:
 
@@ -25,10 +27,12 @@ It uses MiniMax H3 GGUF weights sized to fit in 32 GB, with a Turbo LoRA so a
 | `t2i` | `workflows/sdxl_text_to_image.json` | text | 1024×1024 still | SDXL |
 | `i2i` | `workflows/sdxl_image_to_image.json` | one image + text | restyled still | SDXL |
 | `frame` | — | a generated video | PNG still | ffmpeg |
+| `asr` | `workflows/qwen3_asr_local.json` | local audio file | transcript text, detected language; optional timestamps | Qwen3-ASR 0.6B |
 
-`workflows/api/` contains the same graphs in ComfyUI API format, which is what
-`scripts/render.py` submits. The files in `workflows/` are UI graphs — drop them
-into Comfy Desktop or open them from the workflow browser.
+`workflows/api/` contains API-format graphs. `scripts/render.py` currently
+submits the image/video modes; the ASR graph is a UI/API template, not yet a
+`render.py` command. The files in `workflows/` are UI graphs — drop them into
+Comfy Desktop or open them from the workflow browser.
 
 MiniMax H3 is a video model. Still images use SDXL; you can also pull a PNG from
 any H3 clip with the `frame` mode.
@@ -67,6 +71,20 @@ bash scripts/setup_desktop.sh --workflows
 They appear under **Workflows → linkzag-minimax-h3**. Or open a JSON directly:
 `Workflows → Open` and pick a file from `workflows/`. The installer also seeds
 `ComfyUI/input/example.png` so the image loaders have a valid placeholder.
+
+Install the optional ASR workflow separately:
+
+```bash
+bash scripts/setup_desktop.sh --asr-workflow
+```
+
+## Optional: local Qwen3-ASR
+
+The ASR graph uses the community [ComfyUI-Qwen3-ASR custom node pack](https://github.com/DarioFT/ComfyUI-Qwen3-ASR). Install it through ComfyUI Manager by searching for `Qwen3-ASR`, or follow that project's manual installation instructions. Its Python requirements include PyTorch, Transformers, `qwen-asr`, `soundfile`, and other packages. Check compatibility with the installed ComfyUI Desktop Python/Torch versions before installing; this pack deliberately does not run an unpinned dependency install or change the existing ComfyUI environment automatically. Restart ComfyUI after the node is installed.
+
+Copy a supported audio file into `ComfyUI/input/`, open `qwen3_asr_local.json`, and select that file in **Input audio**. The default is the Qwen3-ASR 0.6B model, automatic language detection, and no word/character timestamps. On first use the custom node may download the model into `ComfyUI/models/Qwen3-ASR/`; select its documented local model path or pre-provision the weights for offline operation. Timestamps require enabling `return_timestamps` and configuring the optional Qwen forced aligner in the model loader; its weights are additional. The model card lists 30 languages and 22 Chinese dialects and an Apache-2.0 license; check the model card and node-pack license before redistribution.
+
+This workflow sends audio to a local ComfyUI process; the graph has no audio upload or remote-transcription step. Model weights may still be downloaded from the selected Hugging Face or ModelScope source. Keep the ComfyUI server bound to loopback and do not expose its unauthenticated local API to an untrusted network. The ASR graph and its Python/MPS runtime have not yet been validated end-to-end on Apple Silicon; treat it as an optional candidate until that smoke test passes. It is not yet a NIP adapter, scheduler, feed client, transcript store, or retention/deletion controller.
 
 ## 4. Run
 
@@ -277,7 +295,9 @@ MiniMax H3 weights are released under the **MiniMax H3 Community License**.
 Local commercial use requires a separate license from Comfy, the official
 reseller. Generated output must retain the required **“Powered by MiniMax H3”**
 attribution. SDXL base 1.0 is under the CreativeML Open RAIL++-M license.
-Review both before publishing.
+Review both before publishing. The optional Qwen3-ASR node pack and weights have
+their own licenses; the Qwen3-ASR 0.6B model card currently identifies Apache-2.0.
+Verify upstream terms before redistribution or commercial deployment.
 
 ## Layout
 
@@ -290,12 +310,12 @@ comfy/
 ├── prompts/                  # copy-paste prompt examples
 ├── scripts/
 │   ├── _comfy_root.sh        # finds ComfyUI Desktop
-│   ├── setup_desktop.sh      # check / nodes / workflows / models
+│   ├── setup_desktop.sh      # check / nodes / workflows / optional ASR graph / models
 │   ├── download_models.sh    # resumable model downloads
 │   ├── open_comfyui.sh       # open Desktop and wait for the API
 │   ├── render.py             # CLI: t2v, i2v, r2v, t2i, i2i, frame
 │   └── build_workflows.py    # regenerates the checked-in JSON graphs
 └── workflows/
-    ├── *.json                # UI graphs for Comfy Desktop
-    └── api/*.api.json        # API graphs used by render.py
+    ├── *.json                # UI graphs for Comfy Desktop, including optional ASR
+    └── api/*.api.json        # API graphs; render.py currently runs image/video modes
 ```

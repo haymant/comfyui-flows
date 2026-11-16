@@ -26,6 +26,15 @@ CreativeML Open RAIL++-M license. Review it before publishing generated images.
 
 Upstream: <https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0>
 
+## Optional Qwen3-ASR
+
+The optional ASR workflow depends on the separately installed
+<https://github.com/DarioFT/ComfyUI-Qwen3-ASR> custom-node project. It is not
+bundled here; consult its current license and dependency terms before installing
+or redistributing it. The default Qwen3-ASR 0.6B weights are hosted at
+<https://huggingface.co/Qwen/Qwen3-ASR-0.6B> and the model card identifies them
+as Apache-2.0. Other model and forced-aligner cards may have separate terms.
+
 ## ComfyUI and custom nodes
 
 ComfyUI is licensed under GPL-3.0. `ComfyUI-GGUF` is installed separately from

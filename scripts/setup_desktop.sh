@@ -4,6 +4,7 @@
 #   bash scripts/setup_desktop.sh --check
 #   bash scripts/setup_desktop.sh --nodes
 #   bash scripts/setup_desktop.sh --workflows
+#   bash scripts/setup_desktop.sh --asr-workflow
 #   bash scripts/setup_desktop.sh --models core
 #   bash scripts/setup_desktop.sh --all
 #
@@ -94,7 +95,8 @@ install_nodes() {
 install_workflows() {
   local dest="$ROOT/user/default/workflows/linkzag-minimax-h3"
   mkdir -p "$dest"
-  cp "$HERE/../workflows/"*.json "$dest/"
+  cp "$HERE/../workflows/minimax_h3_"*.json "$dest/"
+  cp "$HERE/../workflows/sdxl_"*.json "$dest/"
   mkdir -p "$ROOT/input"
   if [ ! -f "$ROOT/input/example.png" ]; then
     cp "$HERE/../assets/example.png" "$ROOT/input/example.png"
@@ -104,6 +106,15 @@ install_workflows() {
   echo "In Comfy Desktop: Workflows -> linkzag-minimax-h3 -> choose a workflow."
 }
 
+install_asr_workflow() {
+  local dest="$ROOT/user/default/workflows/linkzag-asr"
+  mkdir -p "$dest"
+  cp "$HERE/../workflows/qwen3_asr_local.json" "$dest/"
+  echo "copied the local ASR workflow to $dest"
+  echo "Install the optional Qwen3-ASR custom node pack before opening it."
+  echo "In Comfy Desktop: Workflows -> linkzag-asr -> qwen3_asr_local."
+}
+
 usage() {
   cat <<'EOF'
 Install/check the pieces this project needs inside ComfyUI Desktop.
@@ -111,6 +122,7 @@ Install/check the pieces this project needs inside ComfyUI Desktop.
   bash scripts/setup_desktop.sh --check
   bash scripts/setup_desktop.sh --nodes
   bash scripts/setup_desktop.sh --workflows
+  bash scripts/setup_desktop.sh --asr-workflow
   bash scripts/setup_desktop.sh --models core
   bash scripts/setup_desktop.sh --all
 
@@ -125,6 +137,7 @@ case "$ACTION" in
   --check|check) check ;;
   --nodes|nodes) install_nodes ;;
   --workflows|workflows) install_workflows ;;
+  --asr-workflow|asr-workflow) install_asr_workflow ;;
   --models|models)
     PROFILE="${PROFILE:-32gb}" COMFY_ROOT="$ROOT" bash "$HERE/download_models.sh" "${2:-core}"
     ;;
