@@ -1,20 +1,34 @@
 # comfy — standalone ComfyUI media workflows
 
-A self-contained ComfyUI workflow pack for **ComfyUI Desktop on Apple Silicon**.
-It generates video with native stereo audio from text or sample images, and
-still images from text or sample images. An optional Qwen3-ASR workflow adds
-local audio transcription; it is a separate custom-node/model dependency and is
-not required by the image/video workflows.
+A self-contained ComfyUI workflow pack for **ComfyUI Desktop on macOS (Apple
+Silicon / MPS) and Linux (NVIDIA CUDA, AMD ROCm, or x86-64 CPU-only)**. It
+generates video with native stereo audio from text or sample images, still
+images from text or sample images, and optional local speech with Qwen3-TTS and
+Qwen3-ASR. The speech workflows are a separate custom-node/model dependency and
+are not required by the image/video workflows.
 
 Nothing here imports the rest of this repository. The only contract is:
 
 - ComfyUI Desktop is installed.
 - The model files live in `ComfyUI/models/` (the scripts find it for you).
-- The CLI talks to the Desktop server at `http://127.0.0.1:8188`.
+- The CLI talks to the Desktop server at `http://127.0.0.1:8188` (or the port
+  recorded in `comfy-procs/`).
 
-The default profile targets a **MacBook with 32 GB unified memory (M2 Pro/Max)**.
+The default profile targets a **32 GB machine**: an M2 Pro/Max Mac, an NVIDIA
+GPU with 24 GB+ VRAM, or a Linux host with enough system RAM for CPU inference.
 It uses MiniMax H3 GGUF weights sized to fit in 32 GB, with a Turbo LoRA so a
 5-second clip is a coffee break rather than an afternoon.
+
+| Platform | Backend | Status |
+|---|---|---|
+| macOS 13+ on Apple Silicon | MPS | primary; timings below were measured here |
+| Linux x86-64 + NVIDIA | CUDA | supported; default workflows, GGUF encoders |
+| Linux x86-64 + AMD | ROCm | supported where ComfyUI installs a ROCm PyTorch build |
+| Linux x86-64, no GPU | CPU | loads and runs, but H3 video is hours per clip |
+
+ComfyUI Desktop on Linux ships as a `.deb` or AppImage. The scripts look in the
+XDG app-data directories, `~/ComfyUI-Installs/*/ComfyUI`, and `~/ComfyUI`,
+and also honour `COMFY_ROOT` for manual installs.
 
 ## What you get
 
@@ -27,12 +41,15 @@ It uses MiniMax H3 GGUF weights sized to fit in 32 GB, with a Turbo LoRA so a
 | `t2i` | `workflows/sdxl_text_to_image.json` | text | 1024×1024 still | SDXL |
 | `i2i` | `workflows/sdxl_image_to_image.json` | one image + text | restyled still | SDXL |
 | `frame` | — | a generated video | PNG still | ffmpeg |
+| `tts` | `workflows/qwen3_tts_local.json` | text | several seconds of speech | Qwen3-TTS 0.6B |
 | `asr` | `workflows/qwen3_asr_local.json` | local audio file | transcript text, detected language; optional timestamps | Qwen3-ASR 0.6B |
 
-`workflows/api/` contains API-format graphs. `scripts/render.py` currently
-submits the image/video modes; the ASR graph is a UI/API template, not yet a
-`render.py` command. The files in `workflows/` are UI graphs — drop them into
-Comfy Desktop or open them from the workflow browser.
+`workflows/api/` contains API-format graphs. `scripts/render.py` submits the
+image, video, TTS and ASR graphs; `frame` uses ffmpeg. The files in
+`workflows/` are UI graphs — drop them into Comfy Desktop or open them from the
+workflow browser. The `tts` and `asr` modes are the building blocks for a
+speech round-trip test: synthesize a sentence, transcribe the result, and
+compare the two.
 
 MiniMax H3 is a video model. Still images use SDXL; you can also pull a PNG from
 any H3 clip with the `frame` mode.
@@ -42,12 +59,23 @@ any H3 clip with the `frame` mode.
 MiniMax H3's GGUF loaders are not in core ComfyUI. Everything else is core.
 
 ```bash
-bash scripts/setup_desktop.sh --check     # shows the detected paths
+bash scripts/setup_desktop.sh --check     # shows paths, device and server state
 bash scripts/setup_desktop.sh --nodes     # installs ComfyUI-GGUF
 ```
 
 Quit and reopen Comfy Desktop afterwards. If you prefer the GUI, install
 **ComfyUI-GGUF** from ComfyUI Manager instead.
+
+On Linux, install ComfyUI Desktop from the official `.deb` or AppImage first,
+create a local instance, then run the commands above. `--check` prints the
+detected backend and the recommended startup arguments; `--args` prints just
+the arguments if you want to paste them into Desktop's settings:
+
+```bash
+bash scripts/setup_desktop.sh --args
+```
+
+On a CPU-only host the arguments include `--cpu`.
 
 ## 2. Download models
 
@@ -58,6 +86,7 @@ bash scripts/download_models.sh sdxl      # +7 GB, still images
 ```
 
 `PROFILE=24gb` swaps the 14.6 GB Qwen encoder for the 8.5 GB Q2 version.
+`PROFILE=cpu` is an alias for `24gb`; use it on CPU-only or low-RAM hosts.
 `PROFILE=quality` uses Q5 H3 weights; only sensible on 64 GB or more.
 
 The exact files, URLs and sizes are in [MODELS.md](MODELS.md).
@@ -72,23 +101,83 @@ They appear under **Workflows → linkzag-minimax-h3**. Or open a JSON directly:
 `Workflows → Open` and pick a file from `workflows/`. The installer also seeds
 `ComfyUI/input/example.png` so the image loaders have a valid placeholder.
 
-Install the optional ASR workflow separately:
+Install the optional speech workflows separately:
 
 ```bash
+bash scripts/setup_desktop.sh --speech-workflows   # TTS + ASR
+# or individually:
+bash scripts/setup_desktop.sh --tts-workflow
 bash scripts/setup_desktop.sh --asr-workflow
 ```
 
-## Optional: local Qwen3-ASR
+## Optional: local speech (TTS + ASR)
 
-The ASR graph uses the community [ComfyUI-Qwen3-ASR custom node pack](https://github.com/DarioFT/ComfyUI-Qwen3-ASR). Install it through ComfyUI Manager by searching for `Qwen3-ASR`, or follow that project's manual installation instructions. Its Python requirements include PyTorch, Transformers, `qwen-asr`, `soundfile`, and other packages. Check compatibility with the installed ComfyUI Desktop Python/Torch versions before installing; this pack deliberately does not run an unpinned dependency install or change the existing ComfyUI environment automatically. Restart ComfyUI after the node is installed.
+The speech graphs use two community node packs by the same author:
 
-Copy a supported audio file into `ComfyUI/input/`, open `qwen3_asr_local.json`, and select that file in **Input audio**. The default is the Qwen3-ASR 0.6B model, automatic language detection, and no word/character timestamps. On first use the custom node may download the model into `ComfyUI/models/Qwen3-ASR/`; select its documented local model path or pre-provision the weights for offline operation. Timestamps require enabling `return_timestamps` and configuring the optional Qwen forced aligner in the model loader; its weights are additional. The model card lists 30 languages and 22 Chinese dialects and an Apache-2.0 license; check the model card and node-pack license before redistribution.
+- [ComfyUI-Qwen3-TTS](https://github.com/DarioFT/ComfyUI-Qwen3-TTS) — text to speech
+- [ComfyUI-Qwen3-ASR](https://github.com/DarioFT/ComfyUI-Qwen3-ASR) — speech to text
 
-This workflow sends audio to a local ComfyUI process; the graph has no audio upload or remote-transcription step. Model weights may still be downloaded from the selected Hugging Face or ModelScope source. Keep the ComfyUI server bound to loopback and do not expose its unauthenticated local API to an untrusted network. The ASR graph and its Python/MPS runtime have not yet been validated end-to-end on Apple Silicon; treat it as an optional candidate until that smoke test passes. It is not yet a NIP adapter, scheduler, feed client, transcript store, or retention/deletion controller.
+Install them through ComfyUI Manager (search for `Qwen3-TTS` and `Qwen3-ASR`)
+or clone them into `ComfyUI/custom_nodes/` and install their `requirements.txt`
+with the Desktop Python. Their Python requirements include PyTorch,
+Transformers, `qwen-tts` / `qwen-asr`, `soundfile`, and other packages. Check
+compatibility with the installed ComfyUI Desktop Python/Torch versions before
+installing; this pack deliberately does not run an unpinned dependency install
+or change the existing ComfyUI environment automatically. Restart ComfyUI after
+the nodes are installed.
+
+The two packs currently pin different Transformers releases (`qwen-tts`
+4.57.3, `qwen-asr` 4.57.6), so a normal combined `pip install` cannot resolve.
+Both run with 4.57.6; if pip refuses, install the two `qwen-*` wheels with
+`--no-deps` after installing the shared requirements. The safest option is a
+separate ComfyUI venv/base directory for speech experiments, as used by the
+live round-trip test, rather than altering the Desktop environment.
+
+Both node packs are optional and independent of the image/video workflows. The
+TTS graph defaults to `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` with the `Ryan`
+preset voice, English, `bf16` and a 1024-token generation cap. The ASR graph
+defaults to `Qwen/Qwen3-ASR-0.6B` with automatic language detection and no
+word/character timestamps. Models auto-download into
+`ComfyUI/models/Qwen3-TTS/` and `ComfyUI/models/Qwen3-ASR/` on first use; you can
+pre-provision those directories for offline operation.
+
+```bash
+# Several seconds of speech; writes a FLAC file.
+python3 scripts/render.py tts "The quick brown fox jumps over the lazy dog." \
+  --speaker Ryan --language English --output out/speech.flac
+
+# Transcribe it again; writes plain text.
+python3 scripts/render.py asr --audio out/speech.flac --language English \
+  --output out/speech.txt
+```
+
+`--timestamps` enables the ASR node's timestamp output; it needs the optional
+Qwen forced aligner in the model loader, whose weights are additional. On a
+CPU-only host `render.py` selects `fp32` automatically; override it with
+`--precision bf16` if you prefer. In the UI, open `qwen3_tts_local.json` or
+`qwen3_asr_local.json`, edit the text or pick input audio, then press **Run**.
+
+The round-trip test synthesizes speech with the `tts` mode, feeds the file to
+`asr`, and checks that the recognized text matches the input. It needs a live
+server and both model packs:
+
+```bash
+COMFY_ROUNDTRIP=1 python3 -m unittest tests.test_tts_asr_roundtrip -v
+```
+
+It deliberately requires the models: the default test run covers the mocked CLI
+plumbing in `tests/test_render_cli.py`, not a real generation.
+
+These workflows send audio and text to a local ComfyUI process; the graphs have
+no remote-upload step. Model weights may still be downloaded from the selected
+Hugging Face or ModelScope source. Keep the ComfyUI server bound to loopback and
+do not expose its unauthenticated local API to an untrusted network.
 
 ## 4. Run
 
-macOS ships `python3`, not `python`; use `python3` in the commands below.
+macOS ships `python3`, not `python`; use `python3` in the commands below. Linux
+distributions usually provide both, and this pack uses `python3` throughout.
+`bash scripts/open_comfyui.sh` launches Desktop on both platforms.
 
 ### From the ComfyUI window
 
@@ -108,14 +197,23 @@ python3 scripts/render.py flf2v --image start.png --last-image end.png --prompt 
 python3 scripts/render.py r2v --image face.png --prompt "Use <Picture 1> as the identity reference"
 python3 scripts/render.py t2i "a sunlit reading corner" --output out/room.png
 python3 scripts/render.py i2i --image room.jpg --prompt "the same room in winter" --denoise 0.6
+python3 scripts/render.py tts "The quick brown fox jumps over the lazy dog." --output out/speech.flac
+python3 scripts/render.py asr --audio out/speech.flac --output out/speech.txt
 
 python3 scripts/render.py frame --video out/boat.mp4 --at 1.5 --output out/poster.png
 python3 scripts/render.py --list
 ```
 
 Useful flags: `--seed`, `--width/--height`, `--duration`, `--steps`,
-`--denoise`, `--output`, `--dry-run`. `--dry-run` prints the patched API graph
-without submitting it.
+`--denoise`, `--output`, `--dry-run`, `--device`. `--dry-run` prints the
+patched API graph without submitting it. `--device auto` (the default) reads
+the backend from `/system_stats`; use `--device cuda`, `rocm`, `mps` or `cpu`
+to override it. Speech modes add `--language`, `--speaker`, `--instruct`,
+`--tts-model`, `--asr-model`, `--precision` and `--max-new-tokens`.
+
+On a CPU backend, `render.py` automatically switches the H3 video modes to the
+low-memory profile (Q2 text encoder, 3 s, 0.1 MP) and uses a 24-hour timeout.
+Pass `--no-low-memory` to keep the workflow defaults.
 
 Example:
 
@@ -129,7 +227,10 @@ python3 scripts/render.py t2v \
 
 The 32 GB profile stores about 31 GB of weights on disk, but ComfyUI loads the
 text encoder and the diffusion transformer in separate stages. The resident
-working set is roughly 23–26 GB at 0.2 MP, which leaves room for macOS.
+working set is roughly 23–26 GB at 0.2 MP, leaving headroom for the OS. On
+Apple Silicon that is unified memory; on CUDA/ROCm the text encoder is usually
+offloaded to system RAM between stages, so keep at least 32 GB of RAM as well.
+On a CPU-only host every tensor is in system RAM.
 
 | Part | File | Size |
 |---|---|---:|
@@ -143,13 +244,19 @@ The Q4_K_M diffusion file (11.6 GB) also fits 32 GB if you keep other apps
 closed; swap the loader filename after downloading it. Q3_K_M is the default so
 the first run does not immediately hit swap.
 
-If Desktop exposes **extra server arguments**, add:
+If Desktop exposes **extra server arguments**, add the line for your backend
+(`bash scripts/setup_desktop.sh --args` prints it):
 
-```text
---use-pytorch-cross-attention --reserve-vram 6 --cache-none --disable-smart-memory
-```
+| Backend | Startup arguments |
+|---|---|
+| Apple MPS | `--use-pytorch-cross-attention --cache-none --disable-smart-memory` |
+| NVIDIA CUDA | `--cache-none --disable-smart-memory` |
+| AMD ROCm | `--use-pytorch-cross-attention --cache-none --disable-smart-memory` |
+| CPU-only | `--cpu --cache-none --disable-smart-memory` |
 
 Do **not** use `--force-fp16` with H3 on MPS; it has produced black video.
+On CUDA/ROCm `--force-fp16` is not needed either: the GGUF loaders and the
+Turbo LoRA already select suitable dtypes.
 `--cache-none --disable-smart-memory` is the important part on a 32 GB machine:
 it makes ComfyUI unload the text encoder before the transformer needs memory.
 
@@ -160,6 +267,12 @@ These are estimates, not promises. A 48 GB M5 Pro measured 6m54s for a 5.17 s
 roughly **15–30 minutes** for the same 0.2 MP/5 s job once models are warm, and
 roughly double at 0.4 MP. The first run also pays model-load time. Generate a
 short clip at 0.2 MP first, then raise resolution.
+
+CUDA is materially faster for this graph than MPS on a 24 GB-class card, but
+this pack ships no measured CUDA numbers yet — benchmark the low-memory job
+above before committing to a long render. CPU-only is a different category:
+expect **hours per sampling step** for H3 at any useful canvas. On CPU, prefer
+SDXL stills, the speech modes, and 3 s / 0.1 MP H3 clips.
 
 Measured on a 32 GB M2 during the first real render:
 
@@ -175,10 +288,20 @@ machine; it is not comparable to one SDXL cover image.
 ### Desktop startup arguments (important on 32 GB)
 
 In Comfy Desktop, open the installation settings → **Startup Arguments** and
-add:
+add the line for your backend:
 
 ```text
+# Apple Silicon
 --use-pytorch-cross-attention --cache-none --disable-smart-memory
+
+# NVIDIA CUDA
+--cache-none --disable-smart-memory
+
+# AMD ROCm
+--use-pytorch-cross-attention --cache-none --disable-smart-memory
+
+# CPU-only
+--cpu --cache-none --disable-smart-memory
 ```
 
 Restart Desktop. `--cache-none --disable-smart-memory` makes ComfyUI release the
@@ -198,19 +321,22 @@ python3 scripts/render.py t2v "a paper boat on a rain puddle at golden hour" \
 416×256. For a 24 GB-class footprint, download that encoder first:
 
 ```bash
-PROFILE=24gb bash scripts/download_models.sh core
+PROFILE=24gb bash scripts/download_models.sh core   # PROFILE=cpu is the same set
 ```
 
 Close Chrome, Slack and other large apps before rendering. Comfy Desktop and
-macOS need the remaining headroom.
+the OS need the remaining headroom.
 
 ### If memory runs out
 
-1. Use `PROFILE=24gb` (Q2 text encoder) and re-download just that file.
+1. Use `PROFILE=cpu` or `PROFILE=24gb` (Q2 text encoder) and re-download just
+   that file.
 2. Drop the canvas to `0.1 MP` and duration to `3 s`.
 3. Quit Chrome, Slack and other large apps.
 4. Restart Comfy Desktop so it releases cached models.
 5. Keep `--disable-smart-memory` on.
+6. On CUDA/ROCm, check the log for tensors left in system RAM; a 32 GB host
+   needs the same headroom as a 32 GB Mac.
 
 ## Prompting H3
 
@@ -261,7 +387,8 @@ The file is missing or has a different name. Run
 
 **`cannot reach ComfyUI at http://127.0.0.1:8188`**
 Open Comfy Desktop. If it uses another port, set
-`COMFYUI_SERVER=http://127.0.0.1:PORT`.
+`COMFYUI_SERVER=http://127.0.0.1:PORT`. `scripts/open_comfyui.sh` re-reads the
+port that Desktop records in `comfy-procs/` while it waits.
 
 **Black video / NaN audio**
 Remove `--force-fp16` from Desktop's server arguments. Update ComfyUI Desktop.
@@ -274,12 +401,17 @@ ComfyUI skips them; generation still works. If the log bothers you, install
 loader. This pack does not require it.
 
 **Render appears to take hours, or the progress bar jumps**
-The Mac went to sleep mid-render. The ComfyUI log may say
-`Prompt executed in 262 seconds` while the progress bar shows 17 minutes. Run
-long jobs under `caffeinate`:
+The machine went to sleep mid-render. The ComfyUI log may say
+`Prompt executed in 262 seconds` while the progress bar shows 17 minutes.
+Prevent sleep during long jobs:
 
 ```bash
+# macOS
 caffeinate -dimsu python3 scripts/render.py t2v "..." --output out/clip.mp4
+
+# Linux (systemd)
+systemd-inhibit --what=sleep:idle --why="ComfyUI render" \
+  python3 scripts/render.py t2v "..." --output out/clip.mp4
 ```
 
 **Very slow first run**
@@ -287,7 +419,33 @@ Model load dominates. The second run in the same Desktop session is faster.
 Keep `--cache-none` for memory safety, not speed.
 
 **ffmpeg not found for `frame`**
-`brew install ffmpeg`.
+`brew install ffmpeg` on macOS; `sudo apt install ffmpeg` or
+`sudo dnf install ffmpeg` on Linux.
+
+**Desktop will not open on Linux**
+Launch it from the application menu, or run the AppImage directly with
+`--no-sandbox` if the Electron sandbox is blocked. To point the helper script
+at a specific binary:
+`COMFY_DESKTOP_CMD="/path/to/comfyui-desktop" bash scripts/open_comfyui.sh`.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The default run covers graph structure, the CLI (including ASR/TTS against a
+fake ComfyUI server), shell-script syntax and helper detection, and checks that
+the checked-in JSON matches `scripts/build_workflows.py`. The live TTS → ASR
+round trip is opt-in and keeps its speech, transcript, logs and `result.json`
+under `.test/tts_asr_roundtrip/` (gitignored):
+
+```bash
+COMFY_ROUNDTRIP=1 python3 -m unittest tests.test_tts_asr_roundtrip -v
+```
+
+Set `COMFYUI_SERVER` if ComfyUI uses a port other than 8188 and
+`COMFY_ROUNDTRIP_DIR` to keep the artifacts elsewhere.
 
 ## Licensing and attribution
 
@@ -295,9 +453,10 @@ MiniMax H3 weights are released under the **MiniMax H3 Community License**.
 Local commercial use requires a separate license from Comfy, the official
 reseller. Generated output must retain the required **“Powered by MiniMax H3”**
 attribution. SDXL base 1.0 is under the CreativeML Open RAIL++-M license.
-Review both before publishing. The optional Qwen3-ASR node pack and weights have
-their own licenses; the Qwen3-ASR 0.6B model card currently identifies Apache-2.0.
-Verify upstream terms before redistribution or commercial deployment.
+Review all of them before publishing. The optional Qwen3-TTS and Qwen3-ASR node
+packs and weights have their own licenses; the 0.6B model cards currently
+identify Apache-2.0. Verify upstream terms before redistribution or commercial
+deployment.
 
 ## Layout
 
@@ -309,13 +468,14 @@ comfy/
 ├── assets/                   # example.png placeholder for image loaders
 ├── prompts/                  # copy-paste prompt examples
 ├── scripts/
-│   ├── _comfy_root.sh        # finds ComfyUI Desktop
-│   ├── setup_desktop.sh      # check / nodes / workflows / optional ASR graph / models
-│   ├── download_models.sh    # resumable model downloads
+│   ├── _comfy_root.sh        # finds Desktop on macOS/Linux, backend + models
+│   ├── setup_desktop.sh      # check / nodes / workflows / speech graphs / models
+│   ├── download_models.sh    # resumable model downloads and profile aliases
 │   ├── open_comfyui.sh       # open Desktop and wait for the API
-│   ├── render.py             # CLI: t2v, i2v, r2v, t2i, i2i, frame
+│   ├── render.py             # CLI: t2v, i2v, flf2v, r2v, t2i, i2i, tts, asr, frame
 │   └── build_workflows.py    # regenerates the checked-in JSON graphs
+├── tests/                    # CLI, graph and shell-helper tests
 └── workflows/
-    ├── *.json                # UI graphs for Comfy Desktop, including optional ASR
-    └── api/*.api.json        # API graphs; render.py currently runs image/video modes
+    ├── *.json                # UI graphs for Desktop, including speech
+    └── api/*.api.json        # API graphs used by render.py
 ```

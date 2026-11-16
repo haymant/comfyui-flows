@@ -29,6 +29,11 @@ AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 FL2V_TURBO = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
 REF2V_TURBO = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 SDXL = "sd_xl_base_1.0.safetensors"
+TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+TTS_TEXT = (
+    "The quick brown fox jumps over the lazy dog. "
+    "Pack my box with five dozen liquor jugs."
+)
 
 T2V_PROMPT = """A five-second cinematic shot at golden hour: a small white paper boat drifts across a rain puddle on a quiet city street. Warm low sun rakes across wet asphalt, reflections ripple, a light breeze moves fallen leaves. The camera starts low and close to the water, then slowly tracks backward and rises to reveal the street and a distant row of buildings.
 
@@ -221,6 +226,18 @@ UI_IO: dict[str, dict] = {
             ("timestamps", "STRING"),
         ],
     },
+    "Qwen3Loader": {
+        "inputs": [],
+        "outputs": [("model", "QWEN3_MODEL")],
+    },
+    "Qwen3CustomVoice": {
+        "inputs": [("model", "QWEN3_MODEL", False, None)],
+        "outputs": [("AUDIO", "AUDIO")],
+    },
+    "SaveAudio": {
+        "inputs": [("audio", "AUDIO", False, None)],
+        "outputs": [],
+    },
     "PreviewAny": {
         "inputs": [("source", "*", False, None)],
         "outputs": [],
@@ -256,6 +273,9 @@ NODE_SIZE = {
     "LoadAudio": (360, 136),
     "Qwen3ASRLoader": (390, 178),
     "Qwen3ASRTranscribe": (430, 220),
+    "Qwen3Loader": (430, 210),
+    "Qwen3CustomVoice": (480, 360),
+    "SaveAudio": (430, 150),
     "PreviewAny": (280, 166),
 }
 
@@ -316,8 +336,14 @@ class UIGraph:
         b["inputs"][dst_slot]["link"] = link_id
 
     def dump(self, path: Path, name: str) -> None:
+        graph_id = str(uuid.uuid4())
+        if path.exists():
+            try:
+                graph_id = json.loads(path.read_text()).get("id", graph_id)
+            except (OSError, ValueError):
+                pass
         graph = {
-            "id": str(uuid.uuid4()),
+            "id": graph_id,
             "revision": 0,
             "last_node_id": len(self.nodes),
             "last_link_id": len(self.links),
@@ -790,6 +816,60 @@ def build_api_asr() -> None:
     dump_api("qwen3_asr_local", g)
 
 
+def build_tts_ui() -> None:
+    g = UIGraph()
+    g.add(
+        "model",
+        "Qwen3Loader",
+        (40, 30),
+        [TTS_MODEL, "HuggingFace", "bf16", "auto", ""],
+        "Local Qwen3-TTS model",
+    )
+    g.add(
+        "voice",
+        "Qwen3CustomVoice",
+        (540, 70),
+        [TTS_TEXT, "English", "Ryan", 42, "", "", 1024],
+        "Speak text",
+    )
+    g.add("save", "SaveAudio", (1080, 70), ["audio/qwen3_tts"], "Save speech")
+    g.link("model", 0, "voice", 0)
+    g.link("voice", 0, "save", 0)
+    g.dump(UI_DIR / "qwen3_tts_local.json", "Local Qwen3-TTS speech")
+
+
+def build_api_tts() -> None:
+    g = {
+        "1": api_node(
+            "Qwen3Loader",
+            {
+                "repo_id": TTS_MODEL,
+                "source": "HuggingFace",
+                "precision": "bf16",
+                "attention": "auto",
+                "local_model_path": "",
+            },
+            "Local Qwen3-TTS model",
+        ),
+        "2": api_node(
+            "Qwen3CustomVoice",
+            {
+                "model": ["1", 0],
+                "text": TTS_TEXT,
+                "language": "English",
+                "speaker": "Ryan",
+                "seed": 42,
+                "instruct": "",
+                "custom_speaker_name": "",
+                "max_new_tokens": 1024,
+            },
+            "Speak text",
+        ),
+        "3": api_node("SaveAudio", {"audio": ["2", 0], "filename_prefix": "audio/qwen3_tts"}, "Save speech"),
+    }
+    dump_api("qwen3_tts_local", g)
+
+
 def main() -> None:
     UI_DIR.mkdir(parents=True, exist_ok=True)
     API_DIR.mkdir(parents=True, exist_ok=True)
@@ -807,6 +887,8 @@ def main() -> None:
     build_api_sdxl_i2i()
     build_asr_ui()
     build_api_asr()
+    build_tts_ui()
+    build_api_tts()
 
 
 if __name__ == "__main__":

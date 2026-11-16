@@ -3,3 +3,6 @@ output/
 logs/
 .DS_Store
 *.part
+__pycache__/
+*.pyc
+.test/

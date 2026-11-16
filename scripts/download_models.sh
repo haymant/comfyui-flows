@@ -7,9 +7,10 @@
 #   bash scripts/download_models.sh all     # everything (~49 GB)
 #   bash scripts/download_models.sh check
 #
-# Profiles:
-#   PROFILE=32gb     default: Q3 diffusion + Q4 text encoder, fits 32 GB unified memory
+# Profiles (memory, not operating system; they apply to macOS and Linux):
+#   PROFILE=32gb     default: Q3 diffusion + Q4 text encoder, fits 32 GB
 #   PROFILE=24gb     Q3 diffusion + Q2 text encoder, for 24 GB machines
+#   PROFILE=cpu      alias for 24gb; use on CPU-only or low-RAM x86-64 hosts
 #   PROFILE=quality  Q5 diffusion + Q4 text encoder, for 64 GB+ machines
 set -euo pipefail
 
@@ -23,8 +24,9 @@ if [ -z "$ROOT" ]; then
   exit 1
 fi
 
-MODELS="$ROOT/models"
+MODELS="$(comfy_models "$ROOT")"
 PROFILE="${PROFILE:-32gb}"
+DEVICE="$(comfy_device)"
 
 case "$PROFILE" in
   32gb)
@@ -35,7 +37,8 @@ case "$PROFILE" in
     QWEN_FILE="qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
     QWEN_MIN=13600
     ;;
-  24gb)
+  24gb|cpu)
+    PROFILE=cpu
     FL2V_FILE="MiniMax-H3-FL2VA-Pruned-Q3_K_M.gguf"
     FL2V_MIN=8300
     REF2V_FILE="MiniMax-H3-Ref2VA-Pruned-Q3_K_M.gguf"
@@ -52,13 +55,13 @@ case "$PROFILE" in
     QWEN_MIN=13600
     ;;
   *)
-    echo "unknown PROFILE=$PROFILE (use 32gb, 24gb or quality)" >&2
+    echo "unknown PROFILE=$PROFILE (use 32gb, 24gb, cpu or quality)" >&2
     exit 2
     ;;
 esac
 
 file_size() {
-  stat -f%z "$1" 2>/dev/null || wc -c <"$1" | tr -d ' '
+  stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || wc -c <"$1" | tr -d ' '
 }
 
 download() {
@@ -148,7 +151,10 @@ check_all() {
 }
 
 ACTION="${1:-core}"
-echo "ComfyUI models: $MODELS  (profile: $PROFILE)"
+echo "ComfyUI models: $MODELS  (profile: $PROFILE, device: $DEVICE)"
+if [ "$DEVICE" = "cpu" ] && [ "$PROFILE" != "cpu" ]; then
+  echo "note: no GPU detected. Consider PROFILE=cpu for a smaller text encoder." >&2
+fi
 case "$ACTION" in
   core) core ;;
   r2v) r2v ;;

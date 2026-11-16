@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run the workflows in comfy/workflows against a local ComfyUI server.
 
-No third-party dependencies: standard library only. Works with ComfyUI Desktop,
-which normally listens on http://127.0.0.1:8188.
+No third-party dependencies: standard library only. Works with ComfyUI Desktop
+on macOS (MPS) and Linux (CUDA, ROCm or CPU); the compute backend is read from
+the running server.
 
 Examples
 --------
@@ -11,6 +12,8 @@ Examples
     python3 scripts/render.py r2v --image face.png --prompt "Use <Picture 1> ..." --output out/face.mp4
     python3 scripts/render.py t2i "a reading corner" --output out/room.png
     python3 scripts/render.py i2i --image room.jpg --prompt "make it winter" --denoise 0.6
+    python3 scripts/render.py tts "The quick brown fox jumps over the lazy dog." --output out/speech.flac
+    python3 scripts/render.py asr --audio out/speech.flac --output out/speech.txt
     python3 scripts/render.py frame --video out/boat.mp4 --at 1.5 --output out/poster.png
     python3 scripts/render.py --list
 """
@@ -45,25 +48,33 @@ MODES = {
     "r2v": ("minimax_h3_r2v_32gb.api.json", "video"),
     "t2i": ("sdxl_text_to_image.api.json", "image"),
     "i2i": ("sdxl_image_to_image.api.json", "image"),
+    "tts": ("qwen3_tts_local.api.json", "audio"),
+    "asr": ("qwen3_asr_local.api.json", "text"),
 }
 
 VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
-AUDIO_EXT = {".wav", ".flac", ".mp3", ".m4a"}
+AUDIO_EXT = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus"}
+TEXT_EXT = {".txt", ".md"}
+DEFAULT_SUFFIX = {"video": ".mp4", "image": ".png", "audio": ".flac", "text": ".txt"}
 QWEN_LOW = "qwen3vl-32B-MiniMax-H3-Q2_K.gguf"
+
+DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
+CPU_TIMEOUT = 24 * 60 * 60
+DEFAULT_TIMEOUT = 2 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
-def request_json(url: str, payload: dict | None = None) -> dict:
+def request_json(url: str, payload: dict | None = None, timeout: float = 60) -> dict:
     data = None
     headers = {}
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
 
 
@@ -72,7 +83,8 @@ def get_bytes(url: str) -> bytes:
         return resp.read()
 
 
-def upload_image(server: str, path: Path) -> str:
+def upload_input(server: str, path: Path) -> str:
+    """Upload any input file (image or audio) and return its Load* name."""
     boundary = "----comfy" + uuid.uuid4().hex
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     parts: list[bytes] = []
@@ -105,6 +117,53 @@ def upload_image(server: str, path: Path) -> str:
     return f"{sub}/{name}" if sub else name
 
 
+def upload_image(server: str, path: Path) -> str:
+    return upload_input(server, path)
+
+
+def upload_audio(server: str, path: Path) -> str:
+    return upload_input(server, path)
+
+
+# ---------------------------------------------------------------------------
+# Device detection
+# ---------------------------------------------------------------------------
+def server_device(server: str) -> str | None:
+    """Read the backend from a running ComfyUI (/system_stats), if reachable."""
+    try:
+        stats = request_json(server + "/system_stats", timeout=3)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    for device in stats.get("devices") or []:
+        kind = str(device.get("type", "")).lower()
+        name = str(device.get("name", "")).lower()
+        if kind == "cuda" and any(word in name for word in ("amd", "radeon", "rocm", "gfx")):
+            return "rocm"
+        if kind in {"cuda", "rocm", "mps", "cpu"}:
+            return kind
+    return None
+
+
+def host_device() -> str:
+    """Fallback when the server is not running yet."""
+    if sys.platform == "darwin":
+        return "mps"
+    if shutil.which("nvidia-smi"):
+        return "cuda"
+    if os.path.exists("/dev/kfd") or shutil.which("rocm-smi"):
+        return "rocm"
+    return "cpu"
+
+
+def resolve_device(server: str, requested: str) -> tuple[str, str]:
+    if requested != "auto":
+        return requested, "flag"
+    found = server_device(server)
+    if found:
+        return found, "server"
+    return host_device(), "host"
+
+
 # ---------------------------------------------------------------------------
 # Graph patching
 # ---------------------------------------------------------------------------
@@ -116,6 +175,14 @@ def by_title(graph: dict, title: str) -> dict | None:
     for node in graph.values():
         if node.get("_meta", {}).get("title") == title:
             return node
+    return None
+
+
+def first_node(graph: dict, *class_types: str) -> dict | None:
+    for class_type in class_types:
+        found = nodes_of(graph, class_type)
+        if found:
+            return found[0][1]
     return None
 
 
@@ -144,6 +211,10 @@ def patch_seed(graph: dict, seed: int) -> None:
         nodes_of(graph, "RandomNoise")[0][1]["inputs"]["noise_seed"] = seed
     if nodes_of(graph, "KSampler"):
         nodes_of(graph, "KSampler")[0][1]["inputs"]["seed"] = seed
+    for class_type in ("Qwen3CustomVoice", "Qwen3VoiceDesign", "Qwen3VoiceClone"):
+        found = nodes_of(graph, class_type)
+        if found:
+            found[0][1]["inputs"]["seed"] = seed
 
 
 def patch_steps(graph: dict, steps: int) -> None:
@@ -242,6 +313,75 @@ def patch_images(graph: dict, images: list[Path], last_image: Path | None, dry_r
         load["inputs"]["image"] = upload(images[0])
 
 
+def patch_audio(graph: dict, audio: Path | None, dry_run: bool, server: str) -> None:
+    """Wire the uploaded audio file into the ASR LoadAudio node."""
+    node = by_title(graph, "Input audio") or first_node(graph, "LoadAudio")
+    if node is None:
+        raise SystemExit("workflow has no LoadAudio input")
+    if audio is None:
+        raise SystemExit("asr needs --audio (a local audio file)")
+    node["inputs"]["audio"] = audio.name if dry_run else upload_audio(server, audio)
+
+
+def patch_asr(
+    graph: dict,
+    language: str | None,
+    context: str | None,
+    timestamps: bool,
+    model: str | None,
+    precision: str | None = None,
+) -> None:
+    transcribe = by_title(graph, "Transcribe locally") or first_node(graph, "Qwen3ASRTranscribe")
+    if transcribe is None:
+        raise SystemExit("workflow has no Qwen3ASRTranscribe node")
+    if language is not None:
+        transcribe["inputs"]["language"] = language
+    if context is not None:
+        transcribe["inputs"]["context"] = context
+    transcribe["inputs"]["return_timestamps"] = timestamps
+    if model is not None or precision is not None:
+        loader = by_title(graph, "Local Qwen3-ASR model") or first_node(graph, "Qwen3ASRLoader")
+        if loader is None:
+            raise SystemExit("workflow has no Qwen3ASRLoader node")
+        if model is not None:
+            loader["inputs"]["repo_id"] = model
+        if precision is not None:
+            loader["inputs"]["precision"] = precision
+
+
+def patch_tts(
+    graph: dict,
+    text: str,
+    language: str | None,
+    speaker: str | None,
+    instruct: str | None,
+    model: str | None,
+    precision: str | None,
+    max_new_tokens: int | None,
+) -> None:
+    voice = by_title(graph, "Speak text") or first_node(graph, "Qwen3CustomVoice")
+    if voice is None:
+        raise SystemExit("workflow has no Qwen3CustomVoice node")
+    voice["inputs"]["text"] = text
+    if language is not None:
+        voice["inputs"]["language"] = language
+    if speaker is not None:
+        voice["inputs"]["speaker"] = speaker
+    if instruct is not None:
+        voice["inputs"]["instruct"] = instruct
+    if max_new_tokens is not None:
+        voice["inputs"]["max_new_tokens"] = max_new_tokens
+
+    loader = by_title(graph, "Local Qwen3-TTS model") or first_node(graph, "Qwen3Loader")
+    if model is not None or precision is not None:
+        if loader is None:
+            raise SystemExit("workflow has no Qwen3Loader node")
+        if model is not None:
+            loader["inputs"]["repo_id"] = model
+        if precision is not None:
+            loader["inputs"]["precision"] = precision
+
+
 def check_checkpoint(server: str, graph: dict) -> None:
     """Fail early with a useful message when an SDXL checkpoint is missing."""
     loaders = nodes_of(graph, "CheckpointLoaderSimple")
@@ -315,8 +455,25 @@ def collect_files(entry: dict) -> list[dict]:
     return unique
 
 
+def collect_text(entry: dict) -> str | None:
+    """Pull the transcript out of a PreviewAny (or text-returning) node."""
+    outputs = entry.get("outputs", {})
+    candidates: list[str] = []
+    for output in outputs.values():
+        for key in ("text", "string", "value"):
+            value = output.get(key)
+            if isinstance(value, list):
+                candidates.extend(str(item) for item in value if item is not None)
+            elif isinstance(value, str):
+                candidates.append(value)
+    for text in candidates:
+        if text.strip():
+            return text.strip()
+    return None
+
+
 def pick_file(files: list[dict], kind: str) -> dict:
-    allowed = VIDEO_EXT if kind == "video" else IMAGE_EXT if kind == "image" else AUDIO_EXT
+    allowed = VIDEO_EXT if kind == "video" else IMAGE_EXT if kind == "image" else AUDIO_EXT if kind == "audio" else TEXT_EXT
     for item in files:
         if Path(item["filename"]).suffix.lower() in allowed:
             return item
@@ -344,9 +501,15 @@ def ffprobe_duration(video: Path) -> float:
     return float(out.strip())
 
 
+def install_hint(tool: str) -> str:
+    if sys.platform == "darwin":
+        return f"brew install {tool}"
+    return f"sudo apt install {tool}   # or: sudo dnf install {tool}"
+
+
 def extract_frame(video: Path, at: str, output: Path) -> Path:
     if shutil.which("ffmpeg") is None:
-        raise SystemExit("ffmpeg is required for `frame`; install it with: brew install ffmpeg")
+        raise SystemExit(f"ffmpeg is required for `frame`; install it with: {install_hint('ffmpeg')}")
     seconds = ffprobe_duration(video) * float(at[:-1]) / 100.0 if at.endswith("%") else float(at)
     output.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -363,7 +526,7 @@ def extract_frame(video: Path, at: str, output: Path) -> Path:
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Render MiniMax H3 video or SDXL images through a local ComfyUI server.",
+        description="Render MiniMax H3 video, SDXL images, Qwen3-TTS speech or Qwen3-ASR transcripts through a local ComfyUI server.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -374,6 +537,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--negative", help="negative prompt for SDXL")
     parser.add_argument("--image", action="append", type=Path, default=[], help="input image; repeat for R2V references")
     parser.add_argument("--last-image", type=Path, help="optional last frame for i2v")
+    parser.add_argument("--audio", type=Path, help="input audio file for the asr mode")
+    parser.add_argument(
+        "--language",
+        help="language name for tts (Auto, English, German, ...) or asr (English, German, ...; default auto)",
+    )
+    parser.add_argument("--context", help="optional ASR context/hotword text")
+    parser.add_argument("--timestamps", action="store_true", help="ask the ASR node for word/character timestamps")
+    parser.add_argument("--asr-model", metavar="REPO", help="override the Qwen3-ASR model repo id")
+    parser.add_argument("--speaker", help="Qwen3-TTS preset voice (Vivian, Ryan, Aiden, ...)")
+    parser.add_argument("--instruct", help="optional Qwen3-TTS style instruction, e.g. 'calm narration'")
+    parser.add_argument("--tts-model", metavar="REPO", help="override the Qwen3-TTS CustomVoice repo id")
+    parser.add_argument(
+        "--precision",
+        choices=("bf16", "fp16", "fp32"),
+        help="TTS/ASR model precision (default: workflow dtype; fp32 on CPU)",
+    )
+    parser.add_argument("--max-new-tokens", type=int, help="Qwen3-TTS generation cap (default: 1024)")
     parser.add_argument("--video", type=Path, help="source video for `frame`")
     parser.add_argument("--at", default="0.0", help="frame timestamp in seconds or percent, e.g. 1.5 or 50%%")
     parser.add_argument("--output", type=Path)
@@ -388,13 +568,85 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--denoise", type=float)
     parser.add_argument(
         "--low-memory",
-        action="store_true",
-        help="use the Q2 text encoder and 3s / 0.1 MP defaults (download with PROFILE=24gb)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="use the Q2 text encoder and 3s / 0.1 MP defaults (download with PROFILE=cpu); "
+        "automatic on a CPU backend, disable with --no-low-memory",
     )
-    parser.add_argument("--timeout", type=float, default=7200)
+    parser.add_argument(
+        "--device",
+        choices=DEVICES,
+        default="auto",
+        help="compute backend override; auto reads it from /system_stats (default: auto)",
+    )
+    parser.add_argument("--timeout", type=float, default=None, help="job timeout in seconds (default: 2h, 24h on CPU)")
     parser.add_argument("--dry-run", action="store_true", help="print the patched API graph and exit")
     parser.add_argument("--list", action="store_true", help="list modes and workflow files")
     return parser
+
+
+def run_asr(args: argparse.Namespace, graph: dict, device: str) -> None:
+    precision = args.precision or ("fp32" if device == "cpu" else None)
+    patch_asr(graph, args.language, args.context, args.timestamps, args.asr_model, precision)
+    try:
+        patch_audio(graph, args.audio, args.dry_run, args.server)
+    except SystemExit:
+        raise
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"cannot reach ComfyUI at {args.server}: {exc}") from exc
+
+    if args.dry_run:
+        print(json.dumps(graph, ensure_ascii=False, indent=2))
+        return
+
+    timeout = args.timeout or (CPU_TIMEOUT if device == "cpu" else DEFAULT_TIMEOUT)
+    try:
+        prompt_id = submit(args.server, graph)
+    except urllib.error.URLError as exc:
+        raise SystemExit(
+            f"cannot reach ComfyUI at {args.server}: {exc}\n"
+            "Open Comfy Desktop (or run scripts/open_comfyui.sh) and try again."
+        ) from exc
+
+    print(f"queued {prompt_id}  (asr, device {device})")
+    entry = wait_for(args.server, prompt_id, timeout)
+    transcript = collect_text(entry)
+    if not transcript:
+        raise SystemExit("ComfyUI finished but returned no transcript:\n" + json.dumps(entry, indent=2)[-4000:])
+
+    destination = args.output or (DEFAULT_OUTPUT / f"asr_{int(time.time())}.txt")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(transcript + "\n", encoding="utf-8")
+    print(destination)
+
+
+def finish_job(args: argparse.Namespace, graph: dict, kind: str, device: str, seed: int, label: str) -> None:
+    timeout = args.timeout or (CPU_TIMEOUT if device == "cpu" else DEFAULT_TIMEOUT)
+    try:
+        check_checkpoint(args.server, graph)
+        prompt_id = submit(args.server, graph)
+    except urllib.error.URLError as exc:
+        raise SystemExit(
+            f"cannot reach ComfyUI at {args.server}: {exc}\n"
+            "Open Comfy Desktop (or run scripts/open_comfyui.sh) and try again."
+        ) from exc
+
+    print(f"queued {prompt_id}  ({label}, seed {seed}, device {device})")
+    entry = wait_for(args.server, prompt_id, timeout)
+    files = collect_files(entry)
+    if not files:
+        raise SystemExit("ComfyUI finished but returned no output files:\n" + json.dumps(entry, indent=2)[-4000:])
+
+    chosen = pick_file(files, kind)
+    suffix = Path(chosen["filename"]).suffix or DEFAULT_SUFFIX.get(kind, ".bin")
+    destination = args.output or (DEFAULT_OUTPUT / f"{label}_{int(time.time())}_{seed}{suffix}")
+    saved = download(args.server, chosen, destination)
+    print(saved)
+    for item in files:
+        if item is not chosen:
+            extra = destination.with_name(f"{destination.stem}_{Path(item['filename']).name}")
+            download(args.server, item, extra)
+            print(extra)
 
 
 def main() -> None:
@@ -420,16 +672,53 @@ def main() -> None:
     workflow_path = args.workflow or (WORKFLOWS / workflow_name)
     graph = json.loads(workflow_path.read_text())
 
+    device, device_source = resolve_device(args.server, args.device)
+
+    if args.mode == "asr":
+        run_asr(args, graph, device)
+        return
+
     prompt = args.prompt or args.prompt_opt
     if args.prompt_file:
         prompt = args.prompt_file.read_text().strip()
     if not prompt:
         raise SystemExit("a prompt is required (positional or --prompt-file)")
 
+    seed = args.seed if args.seed >= 0 else random.randint(0, 2**32 - 1)
+
+    if args.mode == "tts":
+        patch_tts(
+            graph,
+            prompt,
+            args.language,
+            args.speaker,
+            args.instruct,
+            args.tts_model,
+            args.precision or ("fp32" if device == "cpu" else None),
+            args.max_new_tokens,
+        )
+        patch_seed(graph, seed)
+        if args.dry_run:
+            print(json.dumps(graph, ensure_ascii=False, indent=2))
+            return
+        finish_job(args, graph, "audio", device, seed, "tts")
+        return
+
+    low_memory = args.low_memory
+    if low_memory is None:
+        low_memory = device == "cpu" and device_source in ("server", "flag")
+        if low_memory:
+            print(
+                "note: CPU backend detected; using the low-memory profile "
+                "(Q2 text encoder, 3s, 0.1 MP).\n"
+                "      Download it with: PROFILE=cpu bash scripts/download_models.sh core\n"
+                "      Pass --no-low-memory to keep the workflow defaults.",
+                file=sys.stderr,
+            )
+
     patch_prompt(graph, prompt)
     if args.negative:
         patch_negative(graph, args.negative)
-    seed = args.seed if args.seed >= 0 else random.randint(0, 2**32 - 1)
     patch_seed(graph, seed)
     if args.steps:
         patch_steps(graph, args.steps)
@@ -438,7 +727,7 @@ def main() -> None:
 
     width, height = args.width, args.height
     duration, length = args.duration, args.length
-    if args.low_memory:
+    if low_memory:
         for _, node in nodes_of(graph, "CLIPLoaderGGUF"):
             node["inputs"]["clip_name"] = QWEN_LOW
         if width is None:
@@ -463,31 +752,7 @@ def main() -> None:
         print(json.dumps(graph, ensure_ascii=False, indent=2))
         return
 
-    try:
-        check_checkpoint(args.server, graph)
-        prompt_id = submit(args.server, graph)
-    except urllib.error.URLError as exc:
-        raise SystemExit(
-            f"cannot reach ComfyUI at {args.server}: {exc}\n"
-            "Open Comfy Desktop (or run scripts/open_comfyui.sh) and try again."
-        ) from exc
-
-    print(f"queued {prompt_id}  ({args.mode}, seed {seed})")
-    entry = wait_for(args.server, prompt_id, args.timeout)
-    files = collect_files(entry)
-    if not files:
-        raise SystemExit("ComfyUI finished but returned no output files:\n" + json.dumps(entry, indent=2)[-4000:])
-
-    chosen = pick_file(files, kind)
-    suffix = Path(chosen["filename"]).suffix or (".mp4" if kind == "video" else ".png")
-    destination = args.output or (DEFAULT_OUTPUT / f"{args.mode}_{int(time.time())}_{seed}{suffix}")
-    saved = download(args.server, chosen, destination)
-    print(saved)
-    for item in files:
-        if item is not chosen:
-            extra = destination.with_name(f"{destination.stem}_{Path(item['filename']).name}")
-            download(args.server, item, extra)
-            print(extra)
+    finish_job(args, graph, kind, device, seed, args.mode)
 
 
 if __name__ == "__main__":

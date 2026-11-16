@@ -26,6 +26,15 @@ CreativeML Open RAIL++-M license. Review it before publishing generated images.
 
 Upstream: <https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0>
 
+## Optional Qwen3-TTS
+
+The optional TTS workflow depends on the separately installed
+<https://github.com/DarioFT/ComfyUI-Qwen3-TTS> custom-node project. It is not
+bundled here; consult its current license and dependency terms before installing
+or redistributing it. The default Qwen3-TTS 0.6B CustomVoice weights are hosted
+at <https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice>; other model
+variants (1.7B, VoiceDesign, Base, tokenizer) may have separate terms.
+
 ## Optional Qwen3-ASR
 
 The optional ASR workflow depends on the separately installed

@@ -1,0 +1,148 @@
+{
+  "id": "6f50521c-787f-434b-b259-4dc3b3432704",
+  "revision": 0,
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "Qwen3Loader",
+      "pos": [
+        40,
+        30
+      ],
+      "size": [
+        430,
+        210
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "QWEN3_MODEL",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "Local Qwen3-TTS model",
+      "properties": {
+        "Node name for S&R": "Qwen3Loader"
+      },
+      "widgets_values": [
+        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "HuggingFace",
+        "bf16",
+        "auto",
+        ""
+      ]
+    },
+    {
+      "id": 2,
+      "type": "Qwen3CustomVoice",
+      "pos": [
+        540,
+        70
+      ],
+      "size": [
+        480,
+        360
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "QWEN3_MODEL",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "title": "Speak text",
+      "properties": {
+        "Node name for S&R": "Qwen3CustomVoice"
+      },
+      "widgets_values": [
+        "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.",
+        "English",
+        "Ryan",
+        42,
+        "",
+        "",
+        1024
+      ]
+    },
+    {
+      "id": 3,
+      "type": "SaveAudio",
+      "pos": [
+        1080,
+        70
+      ],
+      "size": [
+        430,
+        150
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 2
+        }
+      ],
+      "outputs": [],
+      "title": "Save speech",
+      "properties": {
+        "Node name for S&R": "SaveAudio"
+      },
+      "widgets_values": [
+        "audio/qwen3_tts"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "QWEN3_MODEL"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.75,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

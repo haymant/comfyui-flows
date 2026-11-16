@@ -1,0 +1,47 @@
+{
+  "1": {
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    },
+    "_meta": {
+      "title": "Local Qwen3-TTS model"
+    }
+  },
+  "2": {
+    "class_type": "Qwen3CustomVoice",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "text": "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.",
+      "language": "English",
+      "speaker": "Ryan",
+      "seed": 42,
+      "instruct": "",
+      "custom_speaker_name": "",
+      "max_new_tokens": 1024
+    },
+    "_meta": {
+      "title": "Speak text"
+    }
+  },
+  "3": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": [
+        "2",
+        0
+      ],
+      "filename_prefix": "audio/qwen3_tts"
+    },
+    "_meta": {
+      "title": "Save speech"
+    }
+  }
+}
