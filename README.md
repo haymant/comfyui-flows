@@ -55,6 +55,12 @@ compare the two.
 MiniMax H3 is a video model. Still images use SDXL; you can also pull a PNG from
 any H3 clip with the `frame` mode.
 
+Two speech helpers run without ComfyUI at all: `scripts/asr.py` (MLX Whisper on
+Apple Silicon, faster-whisper on CUDA/CPU) and `scripts/qa_audio.py` (per-cue
+quality gate over synthesized speech). They are the recommended path for
+long-form transcription and cue checks; the Qwen3 speech graphs remain optional.
+See [Standalone ASR](#standalone-asr-scriptsasrpy--preferred-for-episodes-and-cue-checks).
+
 ## 1. Install the one custom node
 
 MiniMax H3's GGUF loaders are not in core ComfyUI. Everything else is core.
@@ -214,6 +220,87 @@ These workflows send audio and text to a local ComfyUI process; the graphs have
 no remote-upload step. Model weights may still be downloaded from the selected
 Hugging Face or ModelScope source. Keep the ComfyUI server bound to loopback and
 do not expose its unauthenticated local API to an untrusted network.
+
+### Standalone ASR (`scripts/asr.py`) — preferred for episodes and cue checks
+
+`asr`/`asr-long` are a ComfyUI graph. That is useful for a demo, but a
+Whisper-family model is one forward pass over the audio, not a sampling graph:
+through ComfyUI every call pays a queue, an upload, a node graph and a fresh
+process. Measured on an M2 Pro, `whisper-large-v3-turbo` transcribes at roughly
+**5–8× realtime**, while the graph round trip dominates a short cue.
+
+`scripts/asr.py` calls the model directly and reuses it across calls. It needs
+neither ComfyUI nor a running server, and it writes the same text for every
+host:
+
+| Host | Backend | Packages |
+|---|---|---|
+| macOS on Apple Silicon | `mlx` (MLX Whisper) | `mlx-audio`, `mlx` |
+| Linux + NVIDIA | `faster-whisper` (CTranslate2) | `faster-whisper` |
+| CPU-only | `faster-whisper` (`int8`) | `faster-whisper` |
+
+```bash
+# One whole episode. Auto-detects the language and prints a JSON summary.
+python3 scripts/asr.py --audio podcast.mp3 --out out/podcast.txt
+
+# Timestamped output for captions or a transcript sidecar.
+python3 scripts/asr.py --audio cue.wav --out out/cue.srt --format srt --language en
+python3 scripts/asr.py --audio episode.mp3 --out out/episode.json --format json
+
+# Force a backend or a model.
+python3 scripts/asr.py --audio cue.wav --out out/cue.txt --backend faster-whisper --device cpu
+```
+
+- `--format` is `txt`, `json`, `srt` or `vtt`. Subtitle formats need timestamps;
+  `txt`/`json` still work when a backend cannot align.
+- `json` records `text`, `language`, `segments[]`, `model`, `backend`,
+  `duration`, `elapsed` and `realtime_factor`, so a caller can show provenance.
+- `ASR_MODEL` selects the model (default
+  `mlx-community/whisper-large-v3-turbo-asr-fp16`, translated to
+  `large-v3-turbo` for faster-whisper). Set `HF_HUB_OFFLINE=1` once the weights
+  are cached to skip the Hub check.
+- Nothing leaves the machine. The model runs in the same process as the script.
+
+Then load it from Python to keep one model across a cue loop:
+
+```python
+from asr import Transcriber
+
+engine = Transcriber()                 # resolves mlx or faster-whisper
+for cue in cues:
+    print(engine.transcribe(cue, language="en")["text"])
+```
+
+### Cue QA (`scripts/qa_audio.py`)
+
+`qa_audio.py` is the gate for synthesized speech: it transcribes each cue with
+`asr.py` (one loaded model for the whole run) and flags truncation, dropped or
+extra words, stutters, extreme pace and bad levels. WER is used for English,
+CER for Mandarin, and spelled-out numbers are normalised before scoring so
+"seventy-five percent" matches "75%".
+
+```bash
+python3 scripts/qa_audio.py --manifest out/cues.json --out out/qa.json -v
+```
+
+```json
+{
+  "language": "en",
+  "cues": [
+    {"id": "shot-1", "text": "The expected narration.", "audio": "out/shot-1.wav"},
+    {"id": "shot-2", "text": "…", "audio": "out/shot-2.wav"}
+  ]
+}
+```
+
+`audio` resolves relative to the manifest (or `--audio-dir`); with no `audio`
+field the gate reads `<audio-dir>/<id>.wav`. The report lists `status`, `wer`,
+`duration`, `wpm`/`cps`, levels, the expected and heard text, and exact errors
+and warnings per cue. The exit code is non-zero when any cue fails.
+
+This is a gate, not a pronunciation oracle. Accent, timbre and naturalness still
+need a human. Both scripts are covered by `tests/test_asr_qa_cli.py`; the model
+backends are exercised only when `mlx-audio` or `faster-whisper` is installed.
 
 ## 4. Run
 
@@ -477,10 +564,11 @@ python3 -m unittest discover -s tests -v
 ```
 
 The default run covers graph structure, the CLI (including ASR/TTS against a
-fake ComfyUI server), shell-script syntax and helper detection, and checks that
-the checked-in JSON matches `scripts/build_workflows.py`. The live TTS → ASR
-round trip is opt-in and keeps its speech, transcript, logs and `result.json`
-under `.test/tts_asr_roundtrip/` (gitignored):
+fake ComfyUI server), the standalone ASR/QA scripts' formatting, normalisation,
+backend selection and report logic, shell-script syntax and helper detection,
+and checks that the checked-in JSON matches `scripts/build_workflows.py`. The
+live TTS → ASR round trip is opt-in and keeps its speech, transcript, logs and
+`result.json` under `.test/tts_asr_roundtrip/` (gitignored):
 
 ```bash
 COMFY_ROUNDTRIP=1 python3 -m unittest tests.test_tts_asr_roundtrip -v

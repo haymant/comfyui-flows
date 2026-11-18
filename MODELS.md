@@ -45,6 +45,22 @@ the weights for offline operation. Do not install speech packages as part of the
 default image/video setup. On CPU-only hosts `render.py` selects `fp32`
 automatically (the workflow defaults are `bf16` for TTS and `fp16` for ASR).
 
+### Standalone Whisper (no ComfyUI)
+
+`scripts/asr.py` and `scripts/qa_audio.py` use a Whisper model directly instead
+of the ComfyUI graph. They do not touch `ComfyUI/models/`; the weights live in
+the Hugging Face cache (`~/.cache/huggingface/hub`).
+
+| Host | Default model | Cache size | Source |
+|---|---|---:|---|
+| macOS Apple Silicon (MLX) | `mlx-community/whisper-large-v3-turbo-asr-fp16` | ~1.6 GB | [mlx-community/whisper-large-v3-turbo-asr-fp16](https://huggingface.co/mlx-community/whisper-large-v3-turbo-asr-fp16) |
+| Linux CUDA / CPU (faster-whisper) | `large-v3-turbo` (CTranslate2) | ~1.6 GB | [Systran/faster-whisper-large-v3-turbo](https://huggingface.co/Systran/faster-whisper-large-v3-turbo) |
+
+Override with `ASR_MODEL`. Whisper large-v3-turbo is the same model family the
+Qwen3-ASR graph does not replace: Whisper emits sentence timestamps natively and
+runs one pass over long audio, which is why the pack recommends it for
+transcripts and cue QA. Keep Qwen3-ASR for short interactive clips in the graph.
+
 ## Profile alternatives
 
 | Profile | Diffusion | Text encoder | Intended machine |
