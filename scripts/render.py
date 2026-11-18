@@ -14,6 +14,7 @@ Examples
     python3 scripts/render.py i2i --image room.jpg --prompt "make it winter" --denoise 0.6
     python3 scripts/render.py tts "The quick brown fox jumps over the lazy dog." --output out/speech.flac
     python3 scripts/render.py asr --audio out/speech.flac --output out/speech.txt
+    python3 scripts/render.py asr-long --audio podcast.mp3 --output out/podcast.txt
     python3 scripts/render.py frame --video out/boat.mp4 --at 1.5 --output out/poster.png
     python3 scripts/render.py --list
 """
@@ -21,6 +22,7 @@ Examples
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -28,6 +30,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -50,6 +53,7 @@ MODES = {
     "i2i": ("sdxl_image_to_image.api.json", "image"),
     "tts": ("qwen3_tts_local.api.json", "audio"),
     "asr": ("qwen3_asr_local.api.json", "text"),
+    "asr-long": ("qwen3_asr_local.api.json", "text"),
 }
 
 VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov"}
@@ -415,7 +419,7 @@ def submit(server: str, graph: dict) -> str:
     return result["prompt_id"]
 
 
-def wait_for(server: str, prompt_id: str, timeout: float) -> dict:
+def wait_for(server: str, prompt_id: str, timeout: float, error_out: list | None = None) -> dict | None:
     started = time.time()
     last_note = 0.0
     while time.time() - started < timeout:
@@ -425,7 +429,11 @@ def wait_for(server: str, prompt_id: str, timeout: float) -> dict:
             status = entry.get("status", {})
             if status.get("status_str") == "error":
                 messages = status.get("messages", [])
-                raise SystemExit("ComfyUI execution failed:\n" + json.dumps(messages, indent=2)[-6000:])
+                detail = json.dumps(messages, indent=2)
+                if error_out is not None:
+                    error_out.append(detail)
+                    return None
+                raise SystemExit("ComfyUI execution failed:\n" + detail[-6000:])
             return entry
         now = time.time()
         if now - last_note >= 15:
@@ -537,7 +545,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--negative", help="negative prompt for SDXL")
     parser.add_argument("--image", action="append", type=Path, default=[], help="input image; repeat for R2V references")
     parser.add_argument("--last-image", type=Path, help="optional last frame for i2v")
-    parser.add_argument("--audio", type=Path, help="input audio file for the asr mode")
+    parser.add_argument("--audio", type=Path, help="input audio file for the asr / asr-long modes")
+    parser.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=45.0,
+        help="asr-long: seconds per chunk (default 45; the Qwen3-ASR node caps output at 256 tokens)",
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="asr-long: directory for temporary chunks (default: a temporary directory)",
+    )
+    parser.add_argument("--keep-chunks", action="store_true", help="asr-long: keep the split WAV chunks for review")
+    parser.add_argument(
+        "--free",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="asr-long: ask ComfyUI to release cached VRAM before starting (default: on)",
+    )
     parser.add_argument(
         "--language",
         help="language name for tts (Auto, English, German, ...) or asr (English, German, ...; default auto)",
@@ -620,6 +646,277 @@ def run_asr(args: argparse.Namespace, graph: dict, device: str) -> None:
     print(destination)
 
 
+# ---------------------------------------------------------------------------
+# Long-audio ASR
+# ---------------------------------------------------------------------------
+# Qwen3ASRLoader hard-codes max_new_tokens=256. One minute of speech stays
+# below that cap for English; two minutes already truncates mid-sentence. Long
+# episodes are therefore split, each chunk is transcribed separately, and any
+# chunk that still looks cut is reported so the operator can lower
+# --chunk-seconds instead of silently keeping a partial transcript.
+ASR_LONG_PREFIX = "[asr-long]"
+LATIN_TRUNCATION_HINT = 1100
+CJK_TRUNCATION_HINT = 650
+
+
+class AsrChunkOom(RuntimeError):
+    """The GPU ran out of memory while transcribing one chunk."""
+
+
+def asr_event(message: str) -> None:
+    print(f"{ASR_LONG_PREFIX} {message}", file=sys.stderr, flush=True)
+
+
+def free_vram(server: str) -> None:
+    """Ask ComfyUI to drop cached models before the ASR model needs the card."""
+    try:
+        request_json(
+            server + "/free",
+            {"unload_models": True, "free_memory": True},
+            timeout=20,
+        )
+        asr_event("event=free")
+    except (urllib.error.URLError, OSError, ValueError):
+        # /free is best effort; the ASR run may still fit.
+        pass
+
+
+def file_digest(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()[:12]
+
+
+def media_duration(audio: Path) -> float | None:
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1", str(audio),
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        return round(float(out.decode().strip()), 2)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def split_wav(audio: Path, seconds: float, pattern: Path) -> list[Path]:
+    """Split audio into mono 16 kHz WAV chunks without touching the source."""
+    pattern.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(audio),
+            "-ac", "1", "-ar", "16000",
+            "-f", "segment", "-segment_time", f"{seconds:.3f}", "-reset_timestamps", "1",
+            str(pattern),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise SystemExit(
+            "ffmpeg could not prepare the audio for ASR:\n"
+            + (result.stderr or "").strip()[-2000:]
+        )
+    chunks = sorted(pattern.parent.glob(pattern.name.replace("%03d", "*")))
+    if not chunks:
+        raise SystemExit("ffmpeg produced no audio chunks; is --audio a valid media file?")
+    return chunks
+
+
+def is_oom(detail: str) -> bool:
+    lowered = detail.lower()
+    return "out of memory" in lowered or "outofmemory" in lowered
+
+
+def truncation_hint(text: str) -> int:
+    total = len(text)
+    if not total:
+        return 1 << 30
+    cjk = sum(1 for character in text if "\u3040" <= character <= "\u9fff")
+    return CJK_TRUNCATION_HINT if cjk * 100 // total >= 30 else LATIN_TRUNCATION_HINT
+
+
+def transcribe_chunk(
+    server: str,
+    graph: dict,
+    chunk: Path,
+    timeout: float,
+) -> str:
+    patch_audio(graph, chunk, False, server)
+    try:
+        prompt_id = submit(server, graph)
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"cannot reach ComfyUI at {server}: {exc}") from exc
+    errors: list[str] = []
+    entry = wait_for(server, prompt_id, timeout, error_out=errors)
+    if entry is None:
+        detail = errors[0] if errors else "ComfyUI reported an execution error"
+        if is_oom(detail):
+            raise AsrChunkOom(detail)
+        raise SystemExit("ComfyUI execution failed:\n" + detail[-6000:])
+    # A short trailing chunk can be music or silence; Qwen3-ASR then returns an
+    # empty string. That is not a failure of the whole episode: report it and
+    # let the caller decide (it fails only when every chunk is empty).
+    return collect_text(entry) or ""
+
+
+def transcribe_chunk_with_recovery(
+    server: str,
+    graph: dict,
+    chunk: Path,
+    timeout: float,
+    index: int,
+    total: int,
+    depth: int = 0,
+) -> str:
+    """Transcribe one chunk, freeing VRAM and halving it when the GPU is full."""
+    try:
+        return transcribe_chunk(server, graph, chunk, timeout)
+    except AsrChunkOom as error:
+        if depth >= 1:
+            raise SystemExit(
+                "the local ASR model ran out of GPU memory even after freeing VRAM "
+                "and halving the chunk; lower --chunk-seconds or close other GPU apps\n"
+                + str(error)[-2000:]
+            ) from error
+        asr_event("event=oom reason=ComfyUI reported out of memory; freeing VRAM and retrying")
+        free_vram(server)
+        try:
+            return transcribe_chunk(server, graph, chunk, timeout)
+        except AsrChunkOom:
+            halves = split_chunk(chunk)
+            if len(halves) < 2:
+                raise SystemExit(
+                    "the local ASR model ran out of GPU memory and the chunk could not be split"
+                )
+            asr_event(
+                f"event=retry reason=chunk {index + 1}/{total} still out of memory; splitting into {len(halves)} parts"
+            )
+            return " ".join(
+                transcribe_chunk_with_recovery(
+                    server, graph, half, timeout, index, total, depth + 1
+                )
+                for half in halves
+            )
+
+
+def work_pattern(chunk: Path) -> Path:
+    return chunk.with_name(chunk.stem + "-part-%03d.wav")
+
+
+def split_chunk(chunk: Path) -> list[Path]:
+    seconds = media_duration(chunk) or 0.0
+    if seconds <= 0:
+        return []
+    return split_wav(chunk, max(10.0, seconds / 2.0), work_pattern(chunk))
+
+
+def run_asr_long(args: argparse.Namespace, graph: dict, device: str) -> None:
+    precision = args.precision or ("fp32" if device == "cpu" else None)
+    patch_asr(graph, args.language, args.context, args.timestamps, args.asr_model, precision)
+    audio: Path | None = args.audio
+    if audio is None or not audio.exists():
+        raise SystemExit("asr-long needs --audio (an existing local audio file)")
+    if shutil.which("ffmpeg") is None:
+        raise SystemExit(f"ffmpeg is required for `asr-long`; install it with: {install_hint('ffmpeg')}")
+    if args.dry_run:
+        patch_audio(graph, audio, True, args.server)
+        print(json.dumps(graph, ensure_ascii=False, indent=2))
+        return
+
+    created_work = args.work_dir is None
+    work = args.work_dir or Path(tempfile.mkdtemp(prefix="asr-long-"))
+    work.mkdir(parents=True, exist_ok=True)
+    duration = media_duration(audio)
+    digest = file_digest(audio)
+    run_id = uuid.uuid4().hex[:8]
+    chunks = split_wav(audio, args.chunk_seconds, work / f"{digest}-{run_id}-chunk-%03d.wav")
+    asr_event(
+        f"event=prepared chunks={len(chunks)} chunk_seconds={args.chunk_seconds} "
+        f"duration_seconds={duration if duration is not None else 'unknown'}"
+    )
+    if len(chunks) > 1:
+        print(
+            f"note: {audio.name} is {duration or 'unknown'}s; "
+            f"transcribing {len(chunks)} chunks of {args.chunk_seconds}s to stay below the "
+            "Qwen3-ASR 256-token output cap",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    timeout = args.timeout or (CPU_TIMEOUT if device == "cpu" else DEFAULT_TIMEOUT)
+    if args.free:
+        free_vram(args.server)
+
+    texts: list[str] = []
+    warnings: list[str] = []
+    try:
+        for index, chunk in enumerate(chunks):
+            asr_event(f"event=chunk_start {index + 1}/{len(chunks)}")
+            text = transcribe_chunk_with_recovery(
+                args.server, graph, chunk, timeout, index, len(chunks)
+            ).strip()
+            if not text:
+                warning = (
+                    f"chunk {index + 1}/{len(chunks)} returned no text "
+                    "(silence, music or no speech); continuing with the other chunks"
+                )
+                warnings.append(warning)
+                asr_event(f"warning {warning}")
+                asr_event(f"event=chunk_done {index + 1}/{len(chunks)} chars=0")
+                continue
+            if len(text) >= truncation_hint(text):
+                warning = (
+                    f"chunk {index + 1}/{len(chunks)} produced {len(text)} characters and may "
+                    "have hit the Qwen3-ASR 256-token cap; lower --chunk-seconds for a complete transcript"
+                )
+                warnings.append(warning)
+                asr_event(f"warning {warning}")
+            asr_event(f"event=chunk_done {index + 1}/{len(chunks)} chars={len(text)}")
+            if text:
+                texts.append(text)
+    finally:
+        for chunk in chunks:
+            for part in chunk.parent.glob(chunk.stem + "-part-*.wav"):
+                part.unlink(missing_ok=True)
+        if not args.keep_chunks:
+            for chunk in chunks:
+                chunk.unlink(missing_ok=True)
+        if created_work and not args.keep_chunks:
+            shutil.rmtree(work, ignore_errors=True)
+
+    transcript = "\n\n".join(texts).strip()
+    if not transcript:
+        raise SystemExit("local ASR produced an empty transcript")
+
+    destination = args.output or (DEFAULT_OUTPUT / f"asr_long_{int(time.time())}.txt")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(transcript + "\n", encoding="utf-8")
+    sidecar = {
+        "chunks": len(chunks),
+        "chunk_seconds": args.chunk_seconds,
+        "duration_seconds": duration,
+        "warnings": warnings,
+        "device": device,
+        "model": graph.get("2", {}).get("inputs", {}).get("repo_id"),
+        "server": args.server,
+        "audio": str(audio),
+        "characters": len(transcript),
+    }
+    destination.with_suffix(".json").write_text(
+        json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    asr_event(f"event=done chunks={len(chunks)} chars={len(transcript)} warnings={len(warnings)}")
+    print(destination)
+
+
 def finish_job(args: argparse.Namespace, graph: dict, kind: str, device: str, seed: int, label: str) -> None:
     timeout = args.timeout or (CPU_TIMEOUT if device == "cpu" else DEFAULT_TIMEOUT)
     try:
@@ -676,6 +973,10 @@ def main() -> None:
 
     if args.mode == "asr":
         run_asr(args, graph, device)
+        return
+
+    if args.mode == "asr-long":
+        run_asr_long(args, graph, device)
         return
 
     prompt = args.prompt or args.prompt_opt

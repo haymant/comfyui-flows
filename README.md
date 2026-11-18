@@ -42,7 +42,8 @@ and also honour `COMFY_ROOT` for manual installs.
 | `i2i` | `workflows/sdxl_image_to_image.json` | one image + text | restyled still | SDXL |
 | `frame` | — | a generated video | PNG still | ffmpeg |
 | `tts` | `workflows/qwen3_tts_local.json` | text | several seconds of speech | Qwen3-TTS 0.6B |
-| `asr` | `workflows/qwen3_asr_local.json` | local audio file | transcript text, detected language; optional timestamps | Qwen3-ASR 0.6B |
+| `asr` | `workflows/qwen3_asr_local.json` | short local audio file | transcript text, detected language; optional timestamps | Qwen3-ASR 0.6B |
+| `asr-long` | `workflows/qwen3_asr_local.json` | long local audio file | chunked transcript + review sidecar | Qwen3-ASR 0.6B |
 
 `workflows/api/` contains API-format graphs. `scripts/render.py` submits the
 image, video, TTS and ASR graphs; `frame` uses ffmpeg. The files in
@@ -149,7 +150,48 @@ python3 scripts/render.py tts "The quick brown fox jumps over the lazy dog." \
 # Transcribe it again; writes plain text.
 python3 scripts/render.py asr --audio out/speech.flac --language English \
   --output out/speech.txt
+
+# A whole podcast episode: split, transcribe, join, keep a review sidecar.
+python3 scripts/render.py asr-long --audio episode.mp3 --language English \
+  --chunk-seconds 45 --output out/episode.txt
 ```
+
+### Long audio (`asr-long`)
+
+`asr` sends one file as one prompt. That is fine for a sentence or a short cue,
+but not for an episode: the `Qwen3ASRLoader` node hard-codes
+`max_new_tokens=256`, so anything past roughly one minute of speech is cut
+mid-sentence without an error. A 30–60 minute file also exhausts an 8 GB GPU
+because the acoustic encoder's self-attention grows with the input length.
+
+`asr-long` is the episode-scale mode:
+
+- splits the input into mono 16 kHz WAV chunks (`--chunk-seconds`, default 45)
+  using ffmpeg, with a unique upload name per run so ComfyUI's execution cache
+  can never replay a previous transcript;
+- asks ComfyUI to release cached VRAM (`POST /free`, disable with `--no-free`)
+  before the first chunk;
+- prints machine-readable progress on stderr:
+  `[asr-long] event=chunk_start 3/64`, `event=chunk_done 3/64 chars=812`,
+  `event=warning …`, `event=oom …`;
+- on `torch.OutOfMemoryError`, frees VRAM, retries the chunk, and if it still
+  fails halves the chunk and retries once (then fails with an actionable
+  message);
+- warns when a chunk still looks truncated so you can lower `--chunk-seconds`;
+- treats an empty chunk (music, silence, no speech) as a warning and keeps the
+  other chunks instead of failing the whole episode;
+- writes the joined transcript to `--output` and a sidecar JSON next to it
+  (`chunks`, `chunk_seconds`, `duration_seconds`, `warnings`, `device`, `model`).
+
+```bash
+python3 scripts/render.py asr-long --audio episode.mp3 \
+  --chunk-seconds 45 --work-dir /tmp/asr-episode --output out/episode.txt
+```
+
+Chunk files are deleted after the run; pass `--keep-chunks` (or reuse
+`--work-dir`) when you want to inspect them. The sidecar is intentionally kept:
+a downstream wrapper can show which model/device produced the text and which
+chunks were flagged.
 
 `--timestamps` enables the ASR node's timestamp output; it needs the optional
 Qwen forced aligner in the model loader, whose weights are additional. On a

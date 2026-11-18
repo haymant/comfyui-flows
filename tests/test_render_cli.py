@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -36,6 +38,11 @@ class FakeComfy:
         self.outputs: dict = {"4": {"text": [self.transcript]}}
         self.device_type = "cpu"
         self.device_name = "CPU"
+        self.error_once = False
+        self.history_error_served = False
+        self.freed = 0
+        self.prompt_count = 0
+        self.empty_after = None
         app = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -54,11 +61,38 @@ class FakeComfy:
                 if self.path == "/system_stats":
                     self._json({"system": {}, "devices": [{"name": app.device_name, "type": app.device_type}]})
                 elif self.path.startswith("/history/"):
+                    if app.error_once and not app.history_error_served:
+                        app.history_error_served = True
+                        self._json(
+                            {
+                                "p1": {
+                                    "status": {
+                                        "status_str": "error",
+                                        "completed": False,
+                                        "messages": [
+                                            [
+                                                "execution_error",
+                                                {
+                                                    "node_type": "Qwen3ASRTranscribe",
+                                                    "exception_type": "torch.OutOfMemoryError",
+                                                    "exception_message": "Allocation on device 0 would exceed allowed memory. (out of memory)",
+                                                },
+                                            ]
+                                        ],
+                                    },
+                                    "outputs": {},
+                                }
+                            }
+                        )
+                        return
+                    outputs = app.outputs
+                    if app.empty_after is not None and app.prompt_count > app.empty_after:
+                        outputs = {"4": {"text": [""]}}
                     self._json(
                         {
                             "p1": {
                                 "status": {"status_str": "success", "completed": True},
-                                "outputs": app.outputs,
+                                "outputs": outputs,
                             }
                         }
                     )
@@ -88,7 +122,11 @@ class FakeComfy:
                     self._json({"name": app.upload_name, "subfolder": "", "type": "input"})
                 elif self.path == "/prompt":
                     app.prompt = json.loads(body)
+                    app.prompt_count += 1
                     self._json({"prompt_id": "p1"})
+                elif self.path == "/free":
+                    app.freed += 1
+                    self._json({"ok": True})
                 else:
                     self.send_error(404)
 
@@ -328,6 +366,120 @@ class RenderAsrTests(unittest.TestCase):
 
         self.assertEqual(server.uploads, ["roundtrip.flac"])
         self.assertEqual(transcript.read_text(encoding="utf-8").strip(), sentence)
+
+
+def make_tone(path: Path, seconds: float) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+            "-ar", "16000", "-ac", "1", str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+class RenderAsrLongTests(unittest.TestCase):
+    """Long-audio ASR: chunking, progress, VRAM release and OOM recovery."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.audio = self.dir / "episode.wav"
+        if shutil.which("ffmpeg"):
+            make_tone(self.audio, 2.4)
+        self.render = load_render()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_asr_long_requires_audio(self) -> None:
+        with mock.patch.object(sys, "argv", ["render.py", "asr-long", "--device", "cpu"]):
+            with self.assertRaises(SystemExit) as ctx:
+                self.render.main()
+        self.assertIn("needs --audio", str(ctx.exception.code))
+
+    def test_asr_long_dry_run_keeps_the_documented_graph(self) -> None:
+        with mock.patch.object(sys, "argv", ["render.py", "asr-long", "--audio", str(self.audio), "--dry-run", "--device", "cpu"]), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.render.main()
+        graph = json.loads(out.getvalue())
+        self.assertEqual(graph["1"]["class_type"], "LoadAudio")
+        self.assertEqual(graph["3"]["class_type"], "Qwen3ASRTranscribe")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required to chunk audio")
+    def test_asr_long_chunks_joins_and_writes_review_sidecar(self) -> None:
+        server = FakeComfy()
+        self.addCleanup(server.close)
+        output = self.dir / "transcript.txt"
+        stderr = io.StringIO()
+        argv = [
+            "render.py", "asr-long",
+            "--audio", str(self.audio),
+            "--chunk-seconds", "1",
+            "--work-dir", str(self.dir),
+            "--server", server.url,
+            "--output", str(output),
+        ]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            self.render.main()
+
+        self.assertEqual(len(server.uploads), 3)
+        self.assertEqual(len(set(server.uploads)), 3, "each chunk must have a unique ComfyUI cache key")
+        self.assertEqual(output.read_text(encoding="utf-8").strip(), "\n\n".join([server.transcript] * 3))
+        sidecar = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(sidecar["chunks"], 3)
+        self.assertEqual(sidecar["chunk_seconds"], 1)
+        self.assertEqual(sidecar["model"], "Qwen/Qwen3-ASR-0.6B")
+        self.assertGreaterEqual(server.freed, 1, "the pack should release VRAM before starting")
+        self.assertIn("event=prepared chunks=3", stderr.getvalue())
+        self.assertIn("event=done", stderr.getvalue())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required to chunk audio")
+    def test_asr_long_keeps_good_chunks_when_a_trailing_chunk_is_silent(self) -> None:
+        server = FakeComfy()
+        self.addCleanup(server.close)
+        server.empty_after = 2
+        make_tone(self.audio, 2.4)
+        output = self.dir / "transcript.txt"
+        stderr = io.StringIO()
+        argv = [
+            "render.py", "asr-long",
+            "--audio", str(self.audio),
+            "--chunk-seconds", "1",
+            "--work-dir", str(self.dir),
+            "--server", server.url,
+            "--output", str(output),
+        ]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            self.render.main()
+
+        self.assertEqual(output.read_text(encoding="utf-8").strip(), "\n\n".join([server.transcript] * 2))
+        sidecar = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertTrue(any("returned no text" in warning for warning in sidecar["warnings"]))
+        self.assertIn("returned no text", stderr.getvalue())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required to read the audio")
+    def test_asr_long_frees_vram_and_retries_after_an_oom(self) -> None:
+        server = FakeComfy()
+        self.addCleanup(server.close)
+        server.error_once = True
+        output = self.dir / "transcript.txt"
+        stderr = io.StringIO()
+        argv = [
+            "render.py", "asr-long",
+            "--audio", str(self.audio),
+            "--chunk-seconds", "30",
+            "--work-dir", str(self.dir),
+            "--server", server.url,
+            "--output", str(output),
+        ]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            self.render.main()
+
+        self.assertEqual(output.read_text(encoding="utf-8").strip(), server.transcript)
+        self.assertGreaterEqual(server.freed, 2, "an OOM must trigger another /free before the retry")
+        self.assertIn("event=oom", stderr.getvalue())
 
 
 if __name__ == "__main__":
